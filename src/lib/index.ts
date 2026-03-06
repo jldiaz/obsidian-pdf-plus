@@ -56,6 +56,37 @@ export class PDFPlusLib {
 
     PDFCroppedEmbed = PDFCroppedEmbed;
 
+    private dbName = 'ObsidianPDFPlus';
+    private storeName = 'dummy-pdf-cache';
+
+    private async openDummyPdfDb(): Promise<IDBDatabase> {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(this.dbName, 1);
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => resolve(request.result);
+            request.onupgradeneeded = (event) => {
+                const db = (event.target as IDBOpenDBRequest).result;
+                if (!db.objectStoreNames.contains(this.storeName)) {
+                    db.createObjectStore(this.storeName);
+                }
+            };
+        });
+    }
+
+    async clearDummyPdfCache() {
+        try {
+            const db = await this.openDummyPdfDb();
+            const tx = db.transaction(this.storeName, 'readwrite');
+            tx.objectStore(this.storeName).clear();
+            return new Promise((resolve, reject) => {
+                tx.oncomplete = () => { db.close(); resolve(undefined); };
+                tx.onerror = () => { db.close(); reject(tx.error); };
+            });
+        } catch (e) {
+            console.error('PDF++: Failed to clear dummy PDF cache', e);
+        }
+    }
+
     /** PDF-LIB helper classes */
     PDFOutlines = PDFOutlines;
     NameTree = NameTree;
@@ -796,9 +827,85 @@ export class PDFPlusLib {
         // so it's safe to assume that a file starting with "https://", "http://" or "file:///"
         // is not a usual PDF file.
         if (content.startsWith('https://') || content.startsWith('http://')) {
-            const res = await requestUrl(content);
-            if (res.status === 200) {
-                const url = URL.createObjectURL(new Blob([res.arrayBuffer], { type: 'application/pdf' }));
+            let buffer: ArrayBuffer | undefined = undefined;
+
+            try {
+                const db = await this.openDummyPdfDb();
+
+                // Try reading from IndexedDB
+                buffer = await new Promise<ArrayBuffer | undefined>((resolve, reject) => {
+                    const tx = db.transaction(this.storeName, 'readonly');
+                    const store = tx.objectStore(this.storeName);
+                    const req = store.get(content);
+                    req.onsuccess = () => {
+                        const result = req.result;
+                        if (result) {
+                            // Cache hit: resolve array buffer
+                            resolve(result.buffer);
+                        } else {
+                            // Cache miss
+                            resolve(undefined);
+                        }
+                    };
+                    req.onerror = () => reject(req.error);
+                });
+
+                if (buffer) {
+                    // Update lastAccessed
+                    const tx = db.transaction(this.storeName, 'readwrite');
+                    tx.objectStore(this.storeName).put({ buffer, lastAccessed: Date.now() }, content);
+                } else {
+                    // Cache miss: download
+                    const res = await requestUrl(content);
+                    if (res.status === 200) {
+                        buffer = res.arrayBuffer;
+                        if (this.plugin.settings.dummyPdfCacheSize > 0) {
+                            const tx = db.transaction(this.storeName, 'readwrite');
+                            const store = tx.objectStore(this.storeName);
+                            store.put({ buffer, lastAccessed: Date.now() }, content);
+
+                            // Manage size
+                            const getAllReq = store.getAllKeys();
+                            getAllReq.onsuccess = async () => {
+                                const keys = getAllReq.result;
+                                if (keys.length > this.plugin.settings.dummyPdfCacheSize) {
+                                    // Need to find the oldest. We get all items to check lastAccessed.
+                                    const allItemsReq = db.transaction(this.storeName, 'readonly').objectStore(this.storeName).getAll();
+                                    allItemsReq.onsuccess = () => {
+                                        const values = allItemsReq.result;
+                                        const records = keys.map((key, i) => ({ key, lastAccessed: values[i].lastAccessed }));
+                                        records.sort((a, b) => a.lastAccessed - b.lastAccessed);
+
+                                        const limit = this.plugin.settings.dummyPdfCacheSize;
+                                        const keysToDelete = records.slice(0, records.length - limit).map(r => r.key);
+
+                                        if (keysToDelete.length > 0) {
+                                            const deleteTx = db.transaction(this.storeName, 'readwrite');
+                                            const deleteStore = deleteTx.objectStore(this.storeName);
+                                            for (const k of keysToDelete) {
+                                                deleteStore.delete(k);
+                                            }
+                                        }
+                                    };
+                                }
+                            };
+                        }
+                    }
+                }
+                db.close();
+            } catch (err) {
+                console.error('PDF++: Failed to process dummy PDF via IndexedDB.', err);
+                // Fallback to direct download if DB fails entirely
+                if (!buffer) {
+                    try {
+                        const res = await requestUrl(content);
+                        if (res.status === 200) buffer = res.arrayBuffer;
+                    } catch { /* ignore */}
+                }
+            }
+
+            if (buffer) {
+                const url = URL.createObjectURL(new Blob([buffer], { type: 'application/pdf' }));
                 return url;
             }
         } else if (content.startsWith('file:///')) {
