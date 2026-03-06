@@ -56,32 +56,28 @@ export class PDFPlusLib {
 
     PDFCroppedEmbed = PDFCroppedEmbed;
 
-    private dbName = 'ObsidianPDFPlus';
-    private storeName = 'dummy-pdf-cache';
+    get dummyPdfCacheDir(): string {
+        return normalizePath(this.plugin.manifest.dir! + '/dummy-cache');
+    }
 
-    private async openDummyPdfDb(): Promise<IDBDatabase> {
-        return new Promise((resolve, reject) => {
-            const request = indexedDB.open(this.dbName, 1);
-            request.onerror = () => reject(request.error);
-            request.onsuccess = () => resolve(request.result);
-            request.onupgradeneeded = (event) => {
-                const db = (event.target as IDBOpenDBRequest).result;
-                if (!db.objectStoreNames.contains(this.storeName)) {
-                    db.createObjectStore(this.storeName);
-                }
-            };
-        });
+    async hashUrl(url: string) {
+        const msgUint8 = new TextEncoder().encode(url);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        return hashHex + '.pdf';
     }
 
     async clearDummyPdfCache() {
         try {
-            const db = await this.openDummyPdfDb();
-            const tx = db.transaction(this.storeName, 'readwrite');
-            tx.objectStore(this.storeName).clear();
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => { db.close(); resolve(undefined); };
-                tx.onerror = () => { db.close(); reject(tx.error); };
-            });
+            const adapter = this.plugin.app.vault.adapter;
+            if (await adapter.exists(this.dummyPdfCacheDir)) {
+                const files = await adapter.list(this.dummyPdfCacheDir);
+                for (const file of files.files) {
+                    await adapter.remove(file);
+                }
+                new Notice('PDF++: Dummy PDF cache cleared.');
+            }
         } catch (e) {
             console.error('PDF++: Failed to clear dummy PDF cache', e);
         }
@@ -828,79 +824,62 @@ export class PDFPlusLib {
         // is not a usual PDF file.
         if (content.startsWith('https://') || content.startsWith('http://')) {
             let buffer: ArrayBuffer | undefined = undefined;
+            const adapter = this.plugin.app.vault.adapter;
 
             try {
-                const db = await this.openDummyPdfDb();
+                if (!await adapter.exists(this.dummyPdfCacheDir)) {
+                    await adapter.mkdir(this.dummyPdfCacheDir);
+                }
 
-                // Try reading from IndexedDB
-                buffer = await new Promise<ArrayBuffer | undefined>((resolve, reject) => {
-                    const tx = db.transaction(this.storeName, 'readonly');
-                    const store = tx.objectStore(this.storeName);
-                    const req = store.get(content);
-                    req.onsuccess = () => {
-                        const result = req.result;
-                        if (result) {
-                            // Cache hit: resolve array buffer
-                            resolve(result.buffer);
-                        } else {
-                            // Cache miss
-                            resolve(undefined);
-                        }
-                    };
-                    req.onerror = () => reject(req.error);
-                });
+                const fileName = await this.hashUrl(content);
+                const filePath = normalizePath(this.dummyPdfCacheDir + '/' + fileName);
 
-                if (buffer) {
-                    // Update lastAccessed
-                    const tx = db.transaction(this.storeName, 'readwrite');
-                    tx.objectStore(this.storeName).put({ buffer, lastAccessed: Date.now() }, content);
+                if (await adapter.exists(filePath)) {
+                    // Cache hit: read file
+                    buffer = await adapter.readBinary(filePath);
+
+                    // Update modification time for LRU by rewriting it
+                    await adapter.writeBinary(filePath, buffer);
                 } else {
                     // Cache miss: download
                     const res = await requestUrl(content);
                     if (res.status === 200) {
                         buffer = res.arrayBuffer;
+
                         if (this.plugin.settings.dummyPdfCacheSize > 0) {
-                            const tx = db.transaction(this.storeName, 'readwrite');
-                            const store = tx.objectStore(this.storeName);
-                            store.put({ buffer, lastAccessed: Date.now() }, content);
+                            await adapter.writeBinary(filePath, buffer);
 
-                            // Manage size
-                            const getAllReq = store.getAllKeys();
-                            getAllReq.onsuccess = async () => {
-                                const keys = getAllReq.result;
-                                if (keys.length > this.plugin.settings.dummyPdfCacheSize) {
-                                    // Need to find the oldest. We get all items to check lastAccessed.
-                                    const allItemsReq = db.transaction(this.storeName, 'readonly').objectStore(this.storeName).getAll();
-                                    allItemsReq.onsuccess = () => {
-                                        const values = allItemsReq.result;
-                                        const records = keys.map((key, i) => ({ key, lastAccessed: values[i].lastAccessed }));
-                                        records.sort((a, b) => a.lastAccessed - b.lastAccessed);
+                            // Manage size (LRU)
+                            const files = await adapter.list(this.dummyPdfCacheDir);
+                            if (files.files.length > this.plugin.settings.dummyPdfCacheSize) {
+                                const fileStats = await Promise.all(
+                                    files.files.map(async (f) => {
+                                        const stat = await adapter.stat(f);
+                                        return { path: f, mtime: stat?.mtime || 0 };
+                                    })
+                                );
 
-                                        const limit = this.plugin.settings.dummyPdfCacheSize;
-                                        const keysToDelete = records.slice(0, records.length - limit).map(r => r.key);
+                                fileStats.sort((a, b) => a.mtime - b.mtime);
 
-                                        if (keysToDelete.length > 0) {
-                                            const deleteTx = db.transaction(this.storeName, 'readwrite');
-                                            const deleteStore = deleteTx.objectStore(this.storeName);
-                                            for (const k of keysToDelete) {
-                                                deleteStore.delete(k);
-                                            }
-                                        }
-                                    };
+                                const limit = this.plugin.settings.dummyPdfCacheSize;
+                                const filesToDelete = fileStats.slice(0, fileStats.length - limit);
+
+                                for (const f of filesToDelete) {
+                                    await adapter.remove(f.path);
                                 }
-                            };
+                            }
                         }
                     }
                 }
-                db.close();
             } catch (err) {
-                console.error('PDF++: Failed to process dummy PDF via IndexedDB.', err);
-                // Fallback to direct download if DB fails entirely
+                console.error('PDF++: Failed to process dummy PDF via File System.', err);
                 if (!buffer) {
                     try {
                         const res = await requestUrl(content);
                         if (res.status === 200) buffer = res.arrayBuffer;
-                    } catch { /* ignore */}
+                    } catch (e) {
+                        console.debug(e);
+                    }
                 }
             }
 
