@@ -15,6 +15,7 @@ export type AnystyleJson = Partial<{
     pages: string[],
     volume: string[],
     'container-title': string[],
+    'citation-number': string[],
     type: string,
 }>;
 
@@ -72,13 +73,41 @@ export class BibliographyManager extends PDFPlusComponent {
     }
 
     private async parseBibText() {
-        const text = Array.from(this.destIdToBibText.values()).join('\n');
-        const parsed = await this.parseBibliographyText(text);
-        if (parsed) {
-            const destIds = Array.from(this.destIdToBibText.keys());
-            for (let i = 0; i < parsed.length; i++) {
-                this.destIdToParsedBib.set(destIds[i], parsed[i]);
-                this.events.trigger('parsed', destIds[i], parsed[i]);
+        const entries = Array.from(this.destIdToBibText.entries()).filter(([_, text]) => !!text.trim());
+        if (entries.length === 0) return;
+
+        // Number each citation explicitly and separate with double newlines
+        // so that AnyStyle treats each as a distinct entry and returns 'citation-number'.
+        // In Springer / LNCS style, author lists end with ".: " before the title (e.g. "Díaz, J.L.: Joint Autoscaling...").
+        // AnyStyle's CRF model gets confused and treats "J.L.:" as title start; replacing ".: " with ". " fixes it completely.
+        const formatted = entries.map(([_, text], idx) => {
+            const sanitized = text.replace(/\.:\s+/g, '. ');
+            return `[${idx + 1}] ${sanitized}`;
+        }).join('\n\n');
+        const parsed = await this.parseBibliographyText(formatted);
+        if (parsed && Array.isArray(parsed)) {
+            const matchedIndices = new Set<number>();
+            for (const item of parsed) {
+                const citNumStr = item['citation-number']?.[0];
+                if (citNumStr) {
+                    const num = parseInt(citNumStr, 10);
+                    if (!isNaN(num) && num >= 1 && num <= entries.length) {
+                        const index = num - 1;
+                        const destId = entries[index][0];
+                        this.destIdToParsedBib.set(destId, item);
+                        this.events.trigger('parsed', destId, item);
+                        matchedIndices.add(index);
+                    }
+                }
+            }
+
+            // Fallback for any unmapped entries
+            if (matchedIndices.size === 0) {
+                for (let i = 0; i < Math.min(parsed.length, entries.length); i++) {
+                    const destId = entries[i][0];
+                    this.destIdToParsedBib.set(destId, parsed[i]);
+                    this.events.trigger('parsed', destId, parsed[i]);
+                }
             }
         }
     }
@@ -176,20 +205,24 @@ export class BibliographyManager extends PDFPlusComponent {
                 anystyleProcess.on('close', (code) => {
                     if (code) return resolve(null);
 
-                    const results = JSON.parse(resultJson);
+                    try {
+                        const results = JSON.parse(resultJson);
 
-                    if (Array.isArray(results)) {
-                        // Add 'year' entry to each result
-                        for (const result of results) {
-                            for (const date of result.date ?? []) {
-                                const yearMatch = date.match(/\d{4}/);
-                                if (yearMatch) {
-                                    result.year = yearMatch[0];
-                                    break;
+                        if (Array.isArray(results)) {
+                            // Add 'year' entry to each result
+                            for (const result of results) {
+                                for (const date of result.date ?? []) {
+                                    const yearMatch = date.match(/\d{4}/);
+                                    if (yearMatch) {
+                                        result.year = yearMatch[0];
+                                        break;
+                                    }
                                 }
                             }
+                            return resolve(results);
                         }
-                        resolve(results);
+                    } catch (e) {
+                        console.error(`${plugin.manifest.name}: Failed to parse AnyStyle output`, e, resultJson);
                     }
 
                     resolve(null);
@@ -206,6 +239,33 @@ export class BibliographyManager extends PDFPlusComponent {
     on(name: string, callback: (...args: any[]) => any, ctx?: any) {
         return this.events.on(name, callback, ctx);
     }
+}
+
+
+function parseDestCoords(destArray: PDFJsDestArray): { top: number | null, left: number | null } {
+    if (!destArray || destArray.length < 2 || !destArray[1]) {
+        return { top: null, left: null };
+    }
+    const name = destArray[1].name;
+    if (name === 'XYZ') {
+        return {
+            left: typeof destArray[2] === 'number' ? destArray[2] : null,
+            top: typeof destArray[3] === 'number' ? destArray[3] : null,
+        };
+    }
+    if (name === 'FitBH' || name === 'FitH') {
+        return {
+            left: null,
+            top: typeof destArray[2] === 'number' ? destArray[2] : null,
+        };
+    }
+    if (name === 'FitR') {
+        return {
+            left: typeof destArray[2] === 'number' ? destArray[2] : null,
+            top: typeof destArray[5] === 'number' ? destArray[5] : null,
+        };
+    }
+    return { top: null, left: null };
 }
 
 
@@ -228,21 +288,49 @@ class BibliographyTextExtractor {
 
     async extract() {
         const dests = await this.doc.getDestinations();
-        const promises: Promise<void>[] = [];
+        const pageToDests: Map<string, { destId: string; destArray: PDFJsDestArray; top: number | null; left: number | null }[]> = new Map();
+
         for (const destId in dests) {
             if (this.plugin.lib.isCitationId(destId)) {
                 const destArray = dests[destId] as PDFJsDestArray;
+                const pageRefStr = JSON.stringify(destArray[0]);
+                const coords = parseDestCoords(destArray);
+                let list = pageToDests.get(pageRefStr);
+                if (!list) {
+                    list = [];
+                    pageToDests.set(pageRefStr, list);
+                }
+                list.push({ destId, destArray, top: coords.top, left: coords.left });
+            }
+        }
+
+        const promises: Promise<void>[] = [];
+
+        for (const list of pageToDests.values()) {
+            // Sort destinations on the page from top to bottom (descending Y)
+            list.sort((a, b) => {
+                if (a.top !== null && b.top !== null) {
+                    return b.top - a.top;
+                }
+                return 0;
+            });
+
+            for (let i = 0; i < list.length; i++) {
+                const entry = list[i];
+                // Next citation destination on this page provides a natural lower boundary
+                const nextEntry = i + 1 < list.length ? list[i + 1] : undefined;
+
                 promises.push(
-                    this.extractBibTextForDest(destArray)
+                    this.extractBibTextForDest(entry.destArray, nextEntry?.destArray)
                         .then((bibInfo) => {
                             if (bibInfo) {
-                                const bibText = bibInfo.text;
-                                this.onExtractedCallback?.(destId, bibText);
+                                this.onExtractedCallback?.(entry.destId, bibInfo.text);
                             }
                         })
                 );
             }
         }
+
         await Promise.all(promises);
     }
 
@@ -260,68 +348,204 @@ class BibliographyTextExtractor {
         );
     }
 
-    async extractBibTextForDest(destArray: PDFJsDestArray) {
+    async extractBibTextForDest(destArray: PDFJsDestArray, nextDestArray?: PDFJsDestArray) {
         const pageRef = destArray[0];
         const items = await this.getTextContentItemsFromPageRef(pageRef);
+        if (!items || items.length === 0) return null;
 
-        // Whole lotta hand-crafted rules LOL
+        const { top, left } = parseDestCoords(destArray);
+        if (top === null) return null;
 
-        let beginIndex = -1;
-        if (destArray[1].name === 'XYZ') {
-            const left = destArray[2];
-            const top = destArray[3];
-            if (left === null || top === null) return null;
-            beginIndex = items.findIndex((item: TextContentItem) => {
-                if (!item.str) return false;
-                const itemLeft = item.transform[4];
-                const itemTop = item.transform[5] + (item.height || item.transform[0]) * 0.8;
-                return left <= itemLeft && itemTop <= top;
-            });
-        } else if (destArray[1].name === 'FitBH') {
-            const top = destArray[2];
-            if (top === null) return null;
-            beginIndex = items.findIndex((item: TextContentItem) => {
-                if (!item.str) return false;
-                const itemTop = item.transform[5] + (item.height || item.transform[0]) * 0.8;
-                return itemTop <= top;
-            });
-        }
+        const nextCoords = nextDestArray ? parseDestCoords(nextDestArray) : null;
+        const nextTop = nextCoords?.top ?? null;
+        const nextLeft = nextCoords?.left ?? null;
+
+        // Locate the starting item:
+        // In PDF coordinates, transform[5] is the baseline Y (grows upwards).
+        // If 'top' is placed at the baseline or slightly above, we don't discard
+        // the first line as long as its baseline is within a reasonable tolerance of 'top'.
+        const beginIndex = items.findIndex((item: TextContentItem) => {
+            if (!item.str || !item.str.trim()) return false;
+            const fontSize = item.height || Math.abs(item.transform[3]) || item.transform[0] || 10;
+            const itemBaseline = item.transform[5];
+            const itemLeft = item.transform[4];
+
+            // If baseline is well above top, it belongs to a preceding line
+            if (itemBaseline > top + Math.max(fontSize * 0.5, 4)) {
+                return false;
+            }
+
+            // If left is specified, ensure it's not from a preceding column far to the left
+            if (left !== null && itemLeft < left - 15) {
+                return false;
+            }
+
+            return true;
+        });
 
         if (beginIndex === -1) return null;
 
         const beginItem = items[beginIndex];
-        const beginItemLeft = beginItem.transform[4];
-        let text = items[beginIndex].str;
-        let idx = beginIndex + 1;
-        const bibTextItems = [beginItem];
-        while (true) {
+        const beginFontSize = beginItem.height || Math.abs(beginItem.transform[3]) || beginItem.transform[0] || 10;
+        let minLeft = beginItem.transform[4];
+        let hasHangingIndent = false;
+
+        const bibTextItems: TextContentItem[] = [beginItem];
+        let fullText = beginItem.str;
+        let prevItem = beginItem;
+
+        // Check if next destination is in the same column
+        const sameColumn = (left === null || nextLeft === null || Math.abs(left - nextLeft) < 100);
+
+        for (let idx = beginIndex + 1; idx < items.length; idx++) {
             const item = items[idx];
-            if (!item) break;
+            if (!item || !item.str) continue;
 
+            const itemBaseline = item.transform[5];
             const itemLeft = item.transform[4];
+            const itemFontSize = item.height || Math.abs(item.transform[3]) || item.transform[0] || 10;
+            const isNewLine = itemBaseline < prevItem.transform[5] - 3;
 
-            if (itemLeft <= beginItemLeft + Math.max(item.height, 8) * 0.1) {
+            // 1. Boundary from next known citation destination on the same page/column
+            if (nextTop !== null && sameColumn && itemBaseline <= nextTop + 2) {
                 break;
             }
-            if (item.str.trimStart().startsWith('.') || item.str.trimStart().startsWith(',')) {
-                text = text.trimEnd() + item.str.trimStart();
-            } else {
-                text += '\n' + item.str;
+
+            // 2. Abrupt jump upwards (column switch or header)
+            if (itemBaseline > prevItem.transform[5] + 20) {
+                break;
             }
+
+            // 3. Jump to another column horizontally
+            if (left !== null && Math.abs(itemLeft - left) > 200 && isNewLine) {
+                break;
+            }
+
+            if (isNewLine) {
+                const trimmedStr = item.str.trim();
+
+                // 4. Starts with a new citation enumeration/key?
+                // e.g. [2], [15], (2), 2., [Smith20]
+                if (/^\[\d+\]/.test(trimmedStr) || /^\(\d+\)/.test(trimmedStr) || /^\d+\.\s+/.test(trimmedStr) || /^\[[A-Za-z0-9+]+\s*\]/.test(trimmedStr)) {
+                    break;
+                }
+
+                // 5. True hanging indent detection:
+                // Only trigger if we previously observed indented lines (itemLeft >= minLeft + 6)
+                // and this line returns back to the original left margin:
+                if (hasHangingIndent && itemLeft <= minLeft + 3) {
+                    break;
+                }
+
+                if (itemLeft >= minLeft + 6) {
+                    hasHangingIndent = true;
+                } else if (itemLeft < minLeft) {
+                    minLeft = itemLeft;
+                }
+
+                // 6. Large vertical gap between paragraphs (separated bibliography entries)
+                const verticalGap = prevItem.transform[5] - itemBaseline;
+                if (verticalGap > Math.max(beginFontSize, itemFontSize) * 2.2) {
+                    break;
+                }
+
+                if (fullText.endsWith('-')) {
+                    fullText = fullText.slice(0, -1) + trimmedStr;
+                } else if (trimmedStr.startsWith('.') || trimmedStr.startsWith(',')) {
+                    fullText = fullText.trimEnd() + trimmedStr;
+                } else {
+                    fullText += ' ' + trimmedStr;
+                }
+            } else {
+                // Same line
+                const trimmedStr = item.str;
+                if (trimmedStr.startsWith('.') || trimmedStr.startsWith(',') || trimmedStr.startsWith(';') || trimmedStr.startsWith(':')) {
+                    fullText = fullText.trimEnd() + trimmedStr;
+                } else if (!fullText.endsWith(' ') && !trimmedStr.startsWith(' ')) {
+                    fullText += ' ' + trimmedStr;
+                } else {
+                    fullText += trimmedStr;
+                }
+            }
+
             bibTextItems.push(item);
-            idx++;
+            prevItem = item;
         }
 
-        /// Remove the leading enumeration
-        // [1], [2], [3], ...
-        text = text.trimStart().replace(/^\[\d+\]/, '');
-        // (1), (2), (3), ...
-        text = text.trimStart().replace(/^\(\d+\)/, '');
-        // 1., 2., 3., ...
-        text = text.trimStart().replace(/^\d+\./, '');
+        // Clean initial enumeration: [1], (1), 1., [Author20]
+        let cleaned = fullText.trim();
+        cleaned = cleaned.replace(/^\[\d+\]\s*/, '');
+        cleaned = cleaned.replace(/^\(\d+\)\s*/, '');
+        cleaned = cleaned.replace(/^\d+\.\s*/, '');
+        cleaned = cleaned.replace(/^\[[A-Za-z0-9+]+\s*\]\s*/, '');
 
-        return { text: toSingleLine(text), items: bibTextItems };
+        cleaned = normalizeLatexDiacritics(cleaned);
+
+        // Repair URLs split across lines (e.g. "https://doi.org/10.1007/ s10723-...")
+        cleaned = cleaned.replace(/(https?:\/\/[^\s]+)\s+([^\s]+)/g, (match, p1, p2) => {
+            if (p1.endsWith('/') || p1.endsWith('-')) return p1 + p2;
+            return match;
+        });
+
+        return { text: toSingleLine(cleaned), items: bibTextItems };
     }
+}
+
+
+export function normalizeLatexDiacritics(str: string): string {
+    if (!str) return str;
+
+    // Dotless i and j
+    let s = str.replace(/\u0131/g, 'i').replace(/\u0237/g, 'j');
+
+    // Common LaTeX ligatures
+    s = s.replace(/\uFB00/g, 'ff')
+        .replace(/\uFB01/g, 'fi')
+        .replace(/\uFB02/g, 'fl')
+        .replace(/\uFB03/g, 'ffi')
+        .replace(/\uFB04/g, 'ffl')
+        .replace(/\uFB05/g, 'ft')
+        .replace(/\uFB06/g, 'st');
+
+    const acuteMap: Record<string, string> = { a: 'á', e: 'é', i: 'í', o: 'ó', u: 'ú', A: 'Á', E: 'É', I: 'Í', O: 'Ó', U: 'Ú', y: 'ý', Y: 'Ý' };
+    const graveMap: Record<string, string> = { a: 'à', e: 'è', i: 'ì', o: 'ò', u: 'ù', A: 'À', E: 'È', I: 'Ì', O: 'Ò', U: 'Ù' };
+    const tildeMap: Record<string, string> = { n: 'ñ', N: 'Ñ', a: 'ã', o: 'õ', A: 'Ã', O: 'Õ' };
+    const dieresisMap: Record<string, string> = { a: 'ä', e: 'ë', i: 'ï', o: 'ö', u: 'ü', A: 'Ä', E: 'Ë', I: 'Ï', O: 'Ö', U: 'Ü', y: 'ÿ', Y: 'Ÿ' };
+    const circumflexMap: Record<string, string> = { a: 'â', e: 'ê', i: 'î', o: 'ô', u: 'û', A: 'Â', E: 'Ê', I: 'Î', O: 'Ô', U: 'Û' };
+
+    /* eslint-disable no-misleading-character-class */
+    // Acute: \u00B4, \u0301, \u02CA
+    s = s.replace(/(\S)\s+([\u00B4\u0301\u02CA])\s*([aeiouyAEIOUY])/g, (_, prev, _acc, v) => prev + (acuteMap[v] || v));
+    s = s.replace(/([\u00B4\u0301\u02CA])\s*([aeiouyAEIOUY])/g, (_, _acc, v) => acuteMap[v] || v);
+    s = s.replace(/([aeiouyAEIOUY])\s*([\u00B4\u0301\u02CA])\s*(\S)/g, (_, v, _acc, next) => (acuteMap[v] || v) + next);
+    s = s.replace(/([aeiouyAEIOUY])\s*[\u00B4\u0301\u02CA]/g, (_, v) => acuteMap[v] || v);
+
+    // Tilde: \u0303, \u02DC, ~
+    s = s.replace(/(\S)\s+([\u0303\u02DC~])\s*([naoNAO])/g, (_, prev, _acc, v) => prev + (tildeMap[v] || v));
+    s = s.replace(/([\u0303\u02DC~])\s*([naoNAO])/g, (_, _acc, v) => tildeMap[v] || v);
+    s = s.replace(/([naoNAO])\s*([\u0303\u02DC~])\s*(\S)/g, (_, v, _acc, next) => (tildeMap[v] || v) + next);
+    s = s.replace(/([naoNAO])\s*[\u0303\u02DC~]/g, (_, v) => tildeMap[v] || v);
+
+    // Dieresis: \u00A8, \u0308
+    s = s.replace(/(\S)\s+([\u00A8\u0308])\s*([aeiouAEIOU])/g, (_, prev, _acc, v) => prev + (dieresisMap[v] || v));
+    s = s.replace(/([\u00A8\u0308])\s*([aeiouAEIOU])/g, (_, _acc, v) => dieresisMap[v] || v);
+    s = s.replace(/([aeiouAEIOU])\s*([\u00A8\u0308])\s*(\S)/g, (_, v, _acc, next) => (dieresisMap[v] || v) + next);
+    s = s.replace(/([aeiouAEIOU])\s*[\u00A8\u0308]/g, (_, v) => dieresisMap[v] || v);
+
+    // Grave: \u0060, \u0300
+    s = s.replace(/(\S)\s+([\u0060\u0300])\s*([aeiouAEIOU])/g, (_, prev, _acc, v) => prev + (graveMap[v] || v));
+    s = s.replace(/([\u0060\u0300])\s*([aeiouAEIOU])/g, (_, _acc, v) => graveMap[v] || v);
+    s = s.replace(/([aeiouAEIOU])\s*([\u0060\u0300])\s*(\S)/g, (_, v, _acc, next) => (graveMap[v] || v) + next);
+    s = s.replace(/([aeiouAEIOU])\s*[\u0060\u0300]/g, (_, v) => graveMap[v] || v);
+
+    // Circumflex: \u02C6, \u0302, ^
+    s = s.replace(/(\S)\s+([\u02C6\u0302^])\s*([aeiouAEIOU])/g, (_, prev, _acc, v) => prev + (circumflexMap[v] || v));
+    s = s.replace(/([\u02C6\u0302^])\s*([aeiouAEIOU])/g, (_, _acc, v) => circumflexMap[v] || v);
+    s = s.replace(/([aeiouAEIOU])\s*([\u02C6\u0302^])\s*(\S)/g, (_, v, _acc, next) => (circumflexMap[v] || v) + next);
+    s = s.replace(/([aeiouAEIOU])\s*[\u02C6\u0302^]/g, (_, v) => circumflexMap[v] || v);
+    /* eslint-enable no-misleading-character-class */
+
+    return s.normalize('NFC');
 }
 
 
@@ -345,29 +569,37 @@ export class BibliographyDom extends PDFPlusComponent {
     renderParsedBib(parsed: AnystyleJson) {
         const { author, title, year, 'container-title': containerTitle } = parsed;
 
-        if (author) {
+        if (author || title) {
             this.containerEl.createDiv('', (el) => {
-                el.createDiv('bib-title', (el) => {
-                    el.setText(title?.[0] ?? 'No title');
-                });
-                el.createDiv('bib-author-year', (el) => {
-                    const authorText = author
-                        .map((a) => {
-                            let name = '';
-                            if (a.given) name += a.given;
-                            if (a.family) name += ' ' + a.family;
-                            return name;
-                        })
-                        .filter((name) => name)
-                        .join(', ');
-                    el.appendText(authorText);
-                    if (year) {
-                        el.appendText(` (${year})`);
-                    }
-                });
-                if (containerTitle) {
+                if (title && title.length > 0) {
+                    el.createDiv('bib-title', (el) => {
+                        // Strip any residual author initials accidentally classified as title prefix (e.g. "J.L.: Title")
+                        const cleanTitle = title[0].replace(/^([A-Z]\.(?:\s*[A-Z]\.)*):\s*/, '');
+                        el.setText(normalizeLatexDiacritics(cleanTitle));
+                    });
+                }
+                if (author || year) {
+                    el.createDiv('bib-author-year', (el) => {
+                        if (author) {
+                            const authorText = author
+                                .map((a) => {
+                                    let name = '';
+                                    if (a.given) name += a.given;
+                                    if (a.family) name += (name ? ' ' : '') + a.family;
+                                    return name.trim();
+                                })
+                                .filter((name) => name)
+                                .join(', ');
+                            el.appendText(normalizeLatexDiacritics(authorText));
+                        }
+                        if (year) {
+                            el.appendText(author ? ` (${year})` : `(${year})`);
+                        }
+                    });
+                }
+                if (containerTitle && containerTitle.length > 0) {
                     el.createDiv('bib-container-title', (el) => {
-                        el.setText(containerTitle[0]);
+                        el.setText(normalizeLatexDiacritics(containerTitle[0]));
                     });
                 }
             });
