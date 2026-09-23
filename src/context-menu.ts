@@ -204,10 +204,41 @@ export const onOutlineItemContextMenu = (plugin: PDFPlus, child: PDFViewerChild,
                 });
         });
 
-    if (lib.isEditable(child)) {
+    const hasChildren = item.children?.length > 0 || (item.item.items && item.item.items.length > 0);
+
+    if (hasChildren) {
         menu.addItem((menuItem) => {
             menuItem
-                .setTitle('Add subitem')
+                .setTitle('Copy section as markdown list')
+                .setIcon('lucide-list')
+                .onClick(async () => {
+                    await lib.copyLink.copyOutline(child, file, 'list', item, evt.view ?? activeWindow);
+                });
+        });
+    }
+
+    menu.addItem((menuItem) => {
+        menuItem
+            .setTitle('Copy outline as markdown list')
+            .setIcon('lucide-list')
+            .onClick(async () => {
+                await lib.copyLink.copyOutline(child, file, 'list', undefined, evt.view ?? activeWindow);
+            });
+    })
+    .addItem((menuItem) => {
+        menuItem
+            .setTitle('Copy outline as markdown headings')
+            .setIcon('lucide-heading')
+            .onClick(async () => {
+                await lib.copyLink.copyOutline(child, file, 'heading', undefined, evt.view ?? activeWindow);
+            });
+    });
+
+    if (lib.isEditable(child)) {
+        menu.addSeparator()
+            .addItem((menuItem) => {
+                menuItem
+                    .setTitle('Add subitem')
                 .setIcon('lucide-plus')
                 .onClick(() => {
                     new PDFOutlineTitleModal(plugin, 'Add subitem to outline')
@@ -363,16 +394,17 @@ export const onOutlineItemContextMenu = (plugin: PDFPlus, child: PDFViewerChild,
                                     });
                             });
                     });
-            })
-            .addSeparator()
-            .addItem((item) => {
-                item.setTitle('Customize...')
-                    .setIcon('lucide-settings')
-                    .onClick(() => {
-                        plugin.openSettingTab().scrollToHeading('outline');
-                    });
             });
     }
+
+    menu.addSeparator()
+        .addItem((item) => {
+            item.setTitle('Customize...')
+                .setIcon('lucide-settings')
+                .onClick(() => {
+                    plugin.openSettingTab().scrollToHeading('outline');
+                });
+        });
 
     menu.showAtMouseEvent(evt);
 };
@@ -381,8 +413,26 @@ export const onOutlineItemContextMenu = (plugin: PDFPlus, child: PDFViewerChild,
 export const onOutlineContextMenu = (plugin: PDFPlus, child: PDFViewerChild, file: TFile, evt: MouseEvent) => {
     const { lib } = plugin;
 
+    const menu = new Menu()
+        .addItem((menuItem) => {
+            menuItem
+                .setTitle('Copy outline as markdown list')
+                .setIcon('lucide-list')
+                .onClick(async () => {
+                    await lib.copyLink.copyOutline(child, file, 'list', undefined, evt.view ?? activeWindow);
+                });
+        })
+        .addItem((menuItem) => {
+            menuItem
+                .setTitle('Copy outline as markdown headings')
+                .setIcon('lucide-heading')
+                .onClick(async () => {
+                    await lib.copyLink.copyOutline(child, file, 'heading', undefined, evt.view ?? activeWindow);
+                });
+        });
+
     if (lib.isEditable(child)) {
-        new Menu()
+        menu.addSeparator()
             .addItem((menuItem) => {
                 menuItem
                     .setTitle('Add top-level item')
@@ -407,9 +457,19 @@ export const onOutlineContextMenu = (plugin: PDFPlus, child: PDFViewerChild, fil
                                 new Notice(`${plugin.manifest.name}: Failed to add the item.`);
                             });
                     });
-            })
-            .showAtMouseEvent(evt);
+            });
     }
+
+    menu.addSeparator()
+        .addItem((item) => {
+            item.setTitle('Customize...')
+                .setIcon('lucide-settings')
+                .onClick(() => {
+                    plugin.openSettingTab().scrollToHeading('outline');
+                });
+        });
+
+    menu.showAtMouseEvent(evt);
 };
 
 

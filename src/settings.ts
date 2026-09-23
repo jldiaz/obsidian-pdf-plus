@@ -2711,7 +2711,7 @@ export class PDFPlusSettingTab extends PluginSettingTab {
             .setDesc('Reopen tabs or reload the app after changing this option.');
         this.addToggleSetting('outlineContextMenu')
             .setName('Replace the built-in context menu in the outline with a custom one')
-            .setDesc('This enables you to insert a section link with a custom format by right-clicking an item in the outline. Moreover, you will be able to add, rename, or delete outline items if PDF modification is enabled.');
+            .setDesc('This enables you to copy a section link or the outline as Markdown by right-clicking in the outline. Moreover, you will be able to add, rename, or delete outline items if PDF modification is enabled.');
         this.addToggleSetting('outlineDrag')
             .setName('Drag & drop outline item to insert link to section')
             .setDesc('Grab an item in the outline and drop it to a markdown file to insert a section link. Changing this option requires reopening the tabs or reloading the app.');

@@ -96,14 +96,15 @@ export class PDFOutlines {
         if (this.root) iter(this.root);
     }
 
-    async iterAsync(callbacks: { enter?: (item: PDFOutlineItem) => Promise<any>, leave?: (item: PDFOutlineItem) => Promise<any> }) {
+    async iterAsync(callbacks: { enter?: (item: PDFOutlineItem) => Promise<any>, leave?: (item: PDFOutlineItem) => Promise<any> }, root?: PDFOutlineItem) {
         const iter = async (item: PDFOutlineItem) => {
             await callbacks.enter?.(item);
             await item.iterChildrenAsync(iter);
             await callbacks.leave?.(item);
         };
 
-        if (this.root) await iter(this.root);
+        const start = root ?? this.root;
+        if (start) await iter(start);
     }
 
     async prune() {

@@ -5,6 +5,7 @@ import { PDFPlusTemplateProcessor } from 'template';
 import { encodeLinktext, getOffsetInTextLayerNode, getTextLayerInfo, getTextLayerNode, paramsToSubpath, parsePDFSubpath, subpathToParams } from 'utils';
 import { Canvas, PDFOutlineTreeNode, PDFViewerChild, Rect } from 'typings';
 import { ColorPalette } from 'color-palette';
+import { PDFOutlines, PDFOutlineItem } from './outlines';
 
 
 export type AutoFocusTarget =
@@ -213,6 +214,84 @@ export class copyLinkLib extends PDFPlusLibSubmodule {
             this.settings.outlineLinkDisplayTextFormat,
             file, pageNumber, subpath, item.item.title, '', sourcePath
         );
+    }
+
+    async copyOutline(child: PDFViewerChild, file: TFile, type: 'list' | 'heading', targetItem?: PDFOutlineTreeNode, win?: Window): Promise<boolean> {
+        const copyFormat = type === 'list' ? this.settings.copyOutlineAsListFormat : this.settings.copyOutlineAsHeadingsFormat;
+        const displayTextFormat = type === 'list' ? this.settings.copyOutlineAsListDisplayTextFormat : this.settings.copyOutlineAsHeadingsDisplayTextFormat;
+        const minHeadingLevel = this.settings.copyOutlineAsHeadingsMinLevel;
+
+        const useTab = this.app.vault.getConfig('useTab');
+        const tabSize = this.app.vault.getConfig('tabSize');
+        const indent = useTab ? '\t' : ' '.repeat(tabSize);
+
+        const outlineViewer = child.pdfViewer?.pdfOutlineViewer;
+        const itemsToTraverse = targetItem ? [targetItem] : outlineViewer?.children;
+
+        let text = '';
+
+        if (itemsToTraverse && itemsToTraverse.length > 0) {
+            const traverse = async (nodes: PDFOutlineTreeNode[], depth: number) => {
+                for (const node of nodes) {
+                    const dest = await node.getExplicitDestination();
+                    const pageNumber = await node.getPageNumber();
+                    const destArray = this.lib.normalizePDFJsDestArray(dest, pageNumber);
+                    const subpath = this.lib.destArrayToSubpath(destArray);
+                    const evaluated = this.getTextToCopy(
+                        child,
+                        copyFormat,
+                        displayTextFormat,
+                        file, pageNumber, subpath, node.item.title, '', ''
+                    );
+                    if (type === 'list') {
+                        text += `${indent.repeat(depth)}- ${evaluated}\n`;
+                    } else if (type === 'heading') {
+                        text += `#`.repeat(depth + minHeadingLevel) + ` ${evaluated}\n`;
+                    }
+                    if (node.children?.length) {
+                        await traverse(node.children, depth + 1);
+                    }
+                }
+            };
+
+            await traverse(itemsToTraverse, 0);
+        } else {
+            try {
+                const outlines = await PDFOutlines.fromFile(file, this.plugin);
+                await outlines.iterAsync({
+                    enter: async (item) => {
+                        if (!item.isRoot()) {
+                            let subpath: string | null = null;
+                            const dest = item.getExplicitDestination();
+                            if (dest) subpath = await this.lib.destArrayToSubpath(dest);
+
+                            const pageNumber = subpath ? parsePDFSubpath(subpath)?.page : undefined;
+
+                            const evaluated = subpath && pageNumber !== undefined
+                                ? this.getTextToCopy(child, copyFormat, displayTextFormat, file, pageNumber, subpath, item.title!, '', '')
+                                : item.title!;
+
+                            if (type === 'list') {
+                                text += `${indent.repeat(item.depth - 1)}- ${evaluated}\n`;
+                            } else if (type === 'heading') {
+                                text += `#`.repeat(item.depth - 1 + minHeadingLevel) + ` ${evaluated}\n`;
+                            }
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        if (!text) {
+            new Notice(`${this.plugin.manifest.name}: Failed to extract outline items.`);
+            return false;
+        }
+
+        await (win ?? activeWindow).navigator.clipboard.writeText(text);
+        new Notice(`${this.plugin.manifest.name}: ${targetItem ? 'Section outline' : 'Outline'} copied to clipboard.`);
+        return true;
     }
 
     getSelectionLinkInfo() {

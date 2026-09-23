@@ -155,11 +155,11 @@ export class PDFPlusCommands extends PDFPlusLibSubmodule {
                 checkCallback: (checking) => this.editPageLabels(checking)
             }, {
                 id: 'copy-outline-as-list',
-                name: 'Copy PDF outline as markdown list',
+                name: 'Copy PDF outline (TOC) as markdown list',
                 checkCallback: (checking) => this.copyOutline(checking, 'list')
             }, {
                 id: 'copy-outline-as-headings',
-                name: 'Copy PDF outline as markdown headings',
+                name: 'Copy PDF outline (TOC) as markdown headings',
                 checkCallback: (checking) => this.copyOutline(checking, 'heading')
             }, {
                 id: 'add-outline-item',
@@ -768,7 +768,7 @@ export class PDFPlusCommands extends PDFPlusLibSubmodule {
     }
 
     copyOutline(checking: boolean, type: 'list' | 'heading') {
-        const child = this.lib.getPDFViewerChild(true);
+        const child = this.lib.getPDFViewerChild();
         const file = child?.file;
         if (!child || !file) return false;
 
@@ -776,45 +776,7 @@ export class PDFPlusCommands extends PDFPlusLibSubmodule {
         if (!haveOutline) return false;
 
         if (!checking) {
-            const copyFormat = type === 'list' ? this.settings.copyOutlineAsListFormat : this.settings.copyOutlineAsHeadingsFormat;
-            const displayTextFormat = type === 'list' ? this.settings.copyOutlineAsListDisplayTextFormat : this.settings.copyOutlineAsHeadingsDisplayTextFormat;
-            const minHeadingLevel = this.settings.copyOutlineAsHeadingsMinLevel;
-
-            (async () => {
-                const outlines = await PDFOutlines.fromFile(file, this.plugin);
-
-                let text = '';
-
-                const useTab = this.app.vault.getConfig('useTab');
-                const tabSize = this.app.vault.getConfig('tabSize');
-                const indent = useTab ? '\t' : ' '.repeat(tabSize);
-
-                await outlines.iterAsync({
-                    enter: async (item) => {
-                        if (!item.isRoot()) {
-                            let subpath: string | null = null;
-                            const dest = item.getExplicitDestination();
-                            if (dest) subpath = await this.lib.destArrayToSubpath(dest);
-
-                            const pageNumber = subpath ? parsePDFSubpath(subpath)?.page : undefined;
-
-                            // item.title should be non-null for non-root items by the PDF spec
-                            const evaluated = subpath && pageNumber !== undefined
-                                ? this.lib.copyLink.getTextToCopy(child, copyFormat, displayTextFormat, file, pageNumber, subpath, item.title!, '', '')
-                                : item.title!;
-
-                            if (type === 'list') {
-                                text += `${indent.repeat(item.depth - 1)}- ${evaluated}\n`;
-                            } else if (type === 'heading') {
-                                text += `#`.repeat(item.depth + minHeadingLevel - 1) + ` ${evaluated}\n`;
-                            }
-                        }
-                    }
-                });
-
-                navigator.clipboard.writeText(text);
-                new Notice(`${this.plugin.manifest.name}: Outline copied to clipboard.`);
-            })();
+            this.lib.copyLink.copyOutline(child, file, type);
         }
 
         return true;
