@@ -436,27 +436,29 @@ export class MutationObservingChild extends Component {
 }
 
 /** EmbedLike includes embeds, canvas cards, Obsidian's native hover popovers, and Hover Editor. */
-export function isNonEmbedLike(pdfViewer: ObsidianViewer): boolean {
+export function isNonEmbedLike(pdfViewer: ObsidianViewer | null | undefined): boolean {
+    if (!pdfViewer) return false;
     return !pdfViewer.isEmbed && !isHoverEditor(pdfViewer);
 }
 
 /** This is a PDF embed in a markdown file (not a hover popover or a canvas card). */
-export function isEmbed(pdfViewer: ObsidianViewer): boolean {
-    return pdfViewer.isEmbed && !isCanvas(pdfViewer) && !isHoverPopover(pdfViewer);
+export function isEmbed(pdfViewer: ObsidianViewer | null | undefined): boolean {
+    if (!pdfViewer) return false;
+    return !!pdfViewer.isEmbed && !isCanvas(pdfViewer) && !isHoverPopover(pdfViewer);
 }
 
-export function isCanvas(pdfViewer: ObsidianViewer): boolean {
-    return !!(pdfViewer.dom?.containerEl.hasClass('canvas-node-content'));
+export function isCanvas(pdfViewer: ObsidianViewer | null | undefined): boolean {
+    return !!(pdfViewer?.dom?.containerEl?.hasClass('canvas-node-content'));
 }
 
-export function isHoverPopover(pdfViewer: ObsidianViewer): boolean {
-    return !!(pdfViewer.dom?.containerEl.closest('.hover-popover'));
+export function isHoverPopover(pdfViewer: ObsidianViewer | null | undefined): boolean {
+    return !!(pdfViewer?.dom?.containerEl?.closest('.hover-popover'));
 }
 
-export function isHoverEditor(pdfViewer: ObsidianViewer): boolean {
+export function isHoverEditor(pdfViewer: ObsidianViewer | null | undefined): boolean {
     // Hover Editor makes this.viewer.isEmbed false because it opens the file
     // as a stand alone PDF view.
-    return !!(pdfViewer.dom?.containerEl.closest('.hover-editor'));
+    return !!(pdfViewer?.dom?.containerEl?.closest('.hover-editor'));
 }
 
 export function focusObsidian() {

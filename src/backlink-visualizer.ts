@@ -298,7 +298,7 @@ export class RectangleCache extends PDFPlusComponent {
         if (!textLayerInfo || !textLayerInfo.textDivs.length) return null;
 
         const rects = this.lib.highlight.geometry.computeMergedHighlightRects(textLayerInfo, beginIndex, beginOffset, endIndex, endOffset);
-        return rects;
+        return rects && rects.length ? rects : null;
     }
 }
 
@@ -340,8 +340,9 @@ export class PDFViewerBacklinkVisualizer extends PDFBacklinkVisualizer implement
     }
 
     shouldVisualizeBacklinks(): boolean {
-        const viewer = this.child.pdfViewer;
-        return this.settings.highlightBacklinks
+        const viewer = this.child?.pdfViewer;
+        if (!viewer) return false;
+        return !!this.settings.highlightBacklinks
             && (
                 isNonEmbedLike(viewer)
                 || (this.settings.highlightBacklinksInCanvas && isCanvas(viewer))
@@ -351,7 +352,8 @@ export class PDFViewerBacklinkVisualizer extends PDFBacklinkVisualizer implement
     }
 
     visualize() {
-        const viewer = this.child.pdfViewer;
+        const viewer = this.child?.pdfViewer;
+        if (!viewer) return;
 
         this.lib.onPageReady(viewer, this, (pageNumber) => {
             this.domManager.clearDomInPage(pageNumber);
@@ -359,13 +361,25 @@ export class PDFViewerBacklinkVisualizer extends PDFBacklinkVisualizer implement
             const pageIndex = this.index.getPageIndex(pageNumber);
 
             for (const [id, caches] of pageIndex.XYZs) {
-                this.processXYZ(pageNumber, id, caches);
+                try {
+                    this.processXYZ(pageNumber, id, caches);
+                } catch (e) {
+                    console.warn(`PDF++: Failed to process XYZ "${id}" on page ${pageNumber}:`, e);
+                }
             }
             for (const [id, caches] of pageIndex.FitBHs) {
-                this.processFitBH(pageNumber, id, caches);
+                try {
+                    this.processFitBH(pageNumber, id, caches);
+                } catch (e) {
+                    console.warn(`PDF++: Failed to process FitBH "${id}" on page ${pageNumber}:`, e);
+                }
             }
             for (const [id, caches] of pageIndex.FitRs) {
-                this.processFitR(pageNumber, id, caches);
+                try {
+                    this.processFitR(pageNumber, id, caches);
+                } catch (e) {
+                    console.warn(`PDF++: Failed to process FitR "${id}" on page ${pageNumber}:`, e);
+                }
             }
 
             this.domManager.updateStatus(pageNumber, { onPageReady: true });
@@ -379,7 +393,11 @@ export class PDFViewerBacklinkVisualizer extends PDFBacklinkVisualizer implement
             const pageIndex = this.index.getPageIndex(pageNumber);
 
             for (const [id, caches] of pageIndex.selections) {
-                this.processSelection(pageNumber, id, caches);
+                try {
+                    this.processSelection(pageNumber, id, caches);
+                } catch (e) {
+                    console.warn(`PDF++: Failed to process selection "${id}" on page ${pageNumber}:`, e);
+                }
             }
 
             this.domManager.updateStatus(pageNumber, { onTextLayerReady: true });
@@ -393,7 +411,11 @@ export class PDFViewerBacklinkVisualizer extends PDFBacklinkVisualizer implement
             const pageIndex = this.index.getPageIndex(pageNumber);
 
             for (const [id, caches] of pageIndex.annotations) {
-                this.processAnnotation(pageNumber, id, caches);
+                try {
+                    this.processAnnotation(pageNumber, id, caches);
+                } catch (e) {
+                    console.warn(`PDF++: Failed to process annotation "${id}" on page ${pageNumber}:`, e);
+                }
             }
 
             this.domManager.updateStatus(pageNumber, { onAnnotationLayerReady: true });

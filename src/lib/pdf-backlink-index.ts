@@ -149,7 +149,7 @@ export class PDFBacklinkIndex extends PDFPlusComponent {
             const rgb = color.split(',').map((s) => parseInt(s));
             if (rgb.length === 3 && rgb.every((c) => !isNaN(c))) {
                 cache.setColor({ rgb: { r: rgb[0], g: rgb[1], b: rgb[2] } });
-            } else {
+            } else if (color.toLowerCase() !== 'default') {
                 cache.setColor({ name: color });
             }
         }

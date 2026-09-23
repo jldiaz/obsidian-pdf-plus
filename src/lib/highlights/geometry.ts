@@ -15,6 +15,11 @@ export class HighlightGeometryLib extends PDFPlusLibSubmodule {
     computeMergedHighlightRects(textLayer: { textDivs: HTMLElement[], textContentItems: TextContentItem[] }, beginIndex: number, beginOffset: number, endIndex: number, endOffset: number): MergedRect[] {
         const { textContentItems, textDivs } = textLayer;
 
+        if (!textContentItems || !textContentItems.length) return [];
+        if (beginIndex < 0 || beginIndex >= textContentItems.length) return [];
+        if (endIndex < 0 || endIndex >= textContentItems.length) return [];
+        if (beginIndex > endIndex) return [];
+
         const results: MergedRect[] = [];
 
         let mergedRect: Rect | null = null;
@@ -24,14 +29,17 @@ export class HighlightGeometryLib extends PDFPlusLibSubmodule {
         // replace the end point with the end of the previous text content item.
         if (endOffset === 0) {
             endIndex--;
-            endOffset = textContentItems[endIndex].str.length;
+            if (endIndex < beginIndex) return [];
+            const prevItem = textContentItems[endIndex];
+            if (!prevItem || !prevItem.str) return [];
+            endOffset = prevItem.str.length;
         }
 
         for (let index = beginIndex; index <= endIndex; index++) {
             const item = textContentItems[index];
             const textDiv = textDivs[index];
 
-            if (!item.str) continue;
+            if (!item || !item.str) continue;
 
             // the minimum rectangle that contains all the chars of this text content item
             const rect = this.computeHighlightRectForItem(item, textDiv, index, beginIndex, beginOffset, endIndex, endOffset);

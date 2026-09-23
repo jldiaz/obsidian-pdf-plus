@@ -61,10 +61,12 @@ export class DomManager extends PDFPlusComponent {
 
 		let defaultColor = settings.colors[settings.defaultColor];
 		if (!defaultColor || !isHexString(defaultColor)) {
-			defaultColor = 'rgb(var(--text-highlight-bg-rgb))';
+			defaultColor = settings.colors['Yellow'] ?? '#ffd000';
 		}
 		this.styleEl.textContent += [
-			`\n.pdf-plus-backlink-highlight-layer .pdf-plus-backlink:not(.hovered-highlight) {`,
+			`\n.pdf-plus-backlink-highlight-layer .pdf-plus-backlink:not(.hovered-highlight),`,
+			`.pdf-plus-backlink-highlight-layer .pdf-plus-backlink:not(.hovered-highlight)[data-highlight-color="default"],`,
+			`.pdf-embed[data-highlight-color="default"] .textLayer .mod-focused {`,
 			`    --pdf-plus-color: ${defaultColor};`,
 			`    --pdf-plus-backlink-icon-color: ${defaultColor};`,
 			`    --pdf-plus-rect-color: ${defaultColor};`,
@@ -187,9 +189,12 @@ export class DomManager extends PDFPlusComponent {
 			}
 		}
 		if (!defaultColorSet) {
+			const defaultHex = settings.colors['Yellow'] ?? '#ffd000';
+			const rgb = hexToRgb(defaultHex);
+			const rgbStr = rgb ? `${rgb.r}, ${rgb.g}, ${rgb.b}` : '255, 208, 0';
 			this.styleEl.textContent += [
 				`\nbody {`,
-				`    --pdf-plus-default-color-rgb: var(--text-highlight-bg-rgb)`,
+				`    --pdf-plus-default-color-rgb: ${rgbStr}`,
 				`}`
 			].join('\n');
 		}

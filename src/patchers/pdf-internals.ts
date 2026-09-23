@@ -67,6 +67,10 @@ function onPDFInternalsPatchSuccess(plugin: PDFPlus) {
 const reloadPDFViewerComponent = (viewer: PDFViewerComponent, file: TFile | null, subpath?: string) => {
     // reflect the patch to existing PDF views
     // especially reflesh the "contextmenu" event handler (PDFViewerChild.prototype.onContextMenu/onThumbnailContext)
+    if (viewer.visualizer) {
+        viewer.removeChild(viewer.visualizer);
+        delete (viewer as any).visualizer;
+    }
     viewer.unload();
 
     // Clean up the old keymaps already registered by PDFViewerChild,
@@ -89,8 +93,11 @@ const patchPDFViewerComponent = (plugin: PDFPlus, pdfViewerComponent: PDFViewerC
                 const ret = await old.call(this, file, subpath);
 
                 this.then((child) => {
-                    if (!this.visualizer || this.visualizer.file !== file) {
-                        this.visualizer?.unload();
+                    if (!this.visualizer || !this.visualizer._loaded || this.visualizer.file !== file || this.visualizer.child !== child) {
+                        if (this.visualizer) {
+                            this.removeChild(this.visualizer);
+                            delete (this as any).visualizer;
+                        }
                         this.visualizer = this.addChild(PDFViewerBacklinkVisualizer.create(plugin, file, child));
                     }
                 });
